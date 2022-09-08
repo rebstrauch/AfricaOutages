@@ -35,7 +35,7 @@ library(lmtest)
 library(sandwich)
 
 #Load datafile
-sample <- read.csv("sample-24.05.22.csv")
+sample <- read.csv("afro-sample.csv")
 
 ```
 
