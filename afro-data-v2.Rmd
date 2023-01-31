@@ -1,0 +1,603 @@
+---
+title: "africa-data-exact"
+date: "7/9/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Data Management for "Public opinion effects of digital state repression: How Internet outages shape government evaluation in Africa"
+24.01.2023
+
+Required packages
+```{r}
+rm(list=ls())
+library(stargazer)
+library(tidyverse)
+library(readxl)
+library(haven) #load SPSS
+library(hms) #convert characters to time variables
+library(ggplot2)
+library(vistime)
+library(MASS)
+library(lubridate)
+library(countrycode)
+library(gridExtra)
+library(grid)
+
+library(sf)
+library(afriadmin)
+library(sp)
+library(raster)
+library(tmap)
+
+```
+
+
+Load data 
+```{r}
+afro.data <- read_sav("r7_merged_data_34ctry.release.sav")
+ioda.data <- read.csv("ioda_data.csv")
+```
+
+
+Modify merged data from Afrobarometer Round 7
+```{r}
+###select variables of interest
+afro.data <- dplyr::select(afro.data, RESPNO, COUNTRY, REGION, DATEINTR, STRTIME, Q1, Q13, Q36, Q43A, Q43B, Q43D, Q43F, Q58A, Q58B, Q58C, Q97, Q101, Q104)
+names(afro.data) <- c("respno", "country", "region", "day", "time", "age", "pol_intr", "democr", "trst_pres", "trst_parl", "trst_local", "trst_opposition", "perf_pres", "perf_parl", "perf_local", "edu", "female", "housing")
+head(afro.data)
+
+###assign value label to Afrobarometer (original file is in SPSS)
+afro.data$country
+c <- stack(attr(afro.data$country, 'labels')) #labels of country names
+names(c) <- c("country", "country_name" )
+afro.data <- left_join(afro.data, c, by="country")
+
+afro.data$region
+x <- stack(attr(afro.data$region, 'labels')) #labels of region names
+names(x) <- c("region", "region_name" )
+afro.data <- left_join(afro.data, x, by="region")
+
+rm(c,x)
+
+###assign start date and time of interviews
+afro.data$interview <- as.POSIXct(paste(afro.data$day, afro.data$time), format="%Y-%m-%d %H:%M:%S")
+
+
+
+```
+
+```{r}
+###Survey overview per country
+dates <- afro.data %>%
+   group_by(country_name) %>%
+   summarise(startintv = min(day), endintv = max(day)) 
+
+###add start and endday of survey in the individual country to dataframe
+afro.data <- left_join(afro.data, dates, by="country_name")
+
+
+colnames(dates) = c("Country", "Start interviews Round 7", "End interviews Round 7")
+
+
+stargazer(as.data.frame(dates), summary=FALSE, rownames = F, out="~/Dropbox/Apps/Overleaf/AfricaOutages/appendix-A1.tex", float=F)
+```
+
+2a. IODA data overview
+```{r}
+#Extract start date and time (change from UTC time stamp)
+ioda.data$start <- as_datetime(ioda.data$start, origin = lubridate::origin)
+
+ioda.data$startday <- format(ioda.data$start, "%Y-%m-%d")
+ioda.data$starttime <- format(ioda.data$start, "%H:%M:%S")
+ioda.data$starttime <- hms::as_hms(ioda.data$starttime)
+
+ioda.data$end <- ioda.data$start + ioda.data$duration
+ioda.data$endday <- format(ioda.data$end, "%Y-%m-%d")
+
+
+#Modify duration variable to hours
+ioda.data$duration <- ioda.data$duration/3600
+
+
+#Categorize between outages lasting less than an hour, less than 6hrs, less than 12hrs, less than 24 hrs
+ioda.data$dur <- NA
+ioda.data$dur[ioda.data$duration <1] <- "less than 1 hour"
+ioda.data$dur[ioda.data$duration >=1 & ioda.data$duration <6] <- "more than 1 and less than 6 hours"
+ioda.data$dur[ioda.data$duration >=6 & ioda.data$duration <12] <- "more than 6 and less than 12 hours"
+ioda.data$dur[ioda.data$duration >=12 & ioda.data$duration <24] <- "more than 12 and less than 24 hours"
+ioda.data$dur[ioda.data$duration >=24] <- "more than 24 hours"
+
+
+positions <- c("less than 1 hour", "more than 1 and less than 6 hours", "more than 6 and less than 12 hours", "more than 12 and less than 24 hours", "more than 24 hours")
+```
+
+```{r}
+pdf(file.path(file = "~/Dropbox/Apps/Overleaf/AfricaOutages/figure-F1.pdf"), width=7,height=4,paper='special')
+ggplot(ioda.data, aes(x=dur)) +
+  geom_bar(stat = 'count', width = 0.5,) +
+  scale_x_discrete(limits = positions) +
+  theme_minimal() +
+  theme(aspect.ratio = .5) +
+  xlab('') +
+  ylab('') + 
+  coord_flip()
+dev.off()
+```
+
+```{r}
+ioda.data$country_code <- substring(ioda.data$location, 18,19)
+ioda.data$country_name <- countrycode(ioda.data$country_code, origin = 'iso2c', destination ='country.name')
+
+#add ID
+ioda.data <- ioda.data %>%                         
+  mutate(ID = row_number())
+```
+
+Manual changing of region names to match with codes from IODA
+```{r}
+ioda.data$location_name <- ioda.data$location_name %>%
+  str_replace_all(c("Kadiogo" = "Centre",
+                    "Praia" = "Santiago-Praia",
+                    "Atsimo-Andrefana" = "Atsimo Andrefana",
+                    "Mzimba" = "Northern Region", 
+                    "Lilongwe" = "Central Region",
+                    "Mangochi" = "Southern Region",
+                    "Zomba" = "Southern Region",
+                    "Blantyre" = "Southern Region",
+                    "Beau Bassin-Rose Hill" = "Plaine Wilhems",
+                    "Quatre Bornes" = "Plaine Wilhems",
+                    "Rivière Noire" = "Black River",
+                    "Zambezia" = "Zambézia",
+                    "Thiès" = "Thies",
+                    "Orange Free State" = "Free State",
+                    "KwaZulu-Natal" = "Kwazulu Natal",
+                    "Kassala" = "East",
+                    "Dar-Es-Salam" = "Dar Es Salam",
+                    "Zanzibar West" = "Mjini Magharibi"))
+
+
+###differentiate between Maputo City and Province
+map1 <- ioda.data %>%
+  filter(location_code == 2818)
+
+map1$location_name <- map1$location_name %>%
+  str_replace_all(c("Maputo" = "Maputo City"))
+
+map2 <- ioda.data %>%
+  filter(location_code == 2819)
+
+map2$location_name <- map2$location_name %>%
+  str_replace_all(c("Maputo" = "Maputo Province"))
+
+ioda.data <- ioda.data %>%
+  filter(!location_name=="Maputo")
+
+ioda.data <- rbind(ioda.data, map1, map2)
+
+###collapse Kavango-West and Kavango-East to Kavango
+kav1 <- ioda.data %>%
+  filter(location_name=="Kavango")
+
+kav1$location_name <- kav1$location_name %>%
+  str_replace_all(c("Kavango" = "Kavango West"))
+
+kav2 <- ioda.data %>%
+  filter(location_name=="Kavango")
+
+kav2$location_name <- kav2$location_name %>%
+  str_replace_all(c("Kavango" = "Kavango East"))
+
+ioda.data <- ioda.data %>%
+  filter(!location_name=="Kavango")
+ioda.data <- rbind(ioda.data, kav1, kav2)
+
+###change region name in Sierra Leone
+sl <- ioda.data %>%
+  filter(country_name=="Sierra Leone")
+
+sl$location_name <- sl$location_name %>%
+  str_replace_all(c("Western" = "Western Area"))
+
+ioda.data <- ioda.data %>%
+  filter(!country_name=="Sierra Leone")
+
+ioda.data <- rbind(ioda.data, sl)
+
+rm(kav1, kav2, map1, map2, sl)
+                  
+```
+2b. Prepare IODA data for merging:
+```{r}
+###Select only the largest outages
+ioda.data <- ioda.data %>%
+  filter(dur=="more than 24 hours")
+
+###Select only those outages where the starting point of the interviews does not fall with the beginning of the interviews. Otherwise, all people would have experienced an outage event before the interviews even took place  and there would be no pre-treated individuals.
+
+###keep a list of treated regions from the beginning - those regions will be excluded later from the sample as they are 'contaminated' with the experience of an outage event
+names(dates) <- c("country_name", "startintv", "endintv")
+ioda.data <- left_join(ioda.data, dates, by = "country_name")
+
+###drop those cases where the beginning of the outage falls on the same day with the beginning of the interviews 
+ioda.data$drop <- ifelse(ioda.data$startday==ioda.data$startintv | ioda.data$startday==ioda.data$endintv,  TRUE, FALSE)
+
+###keep dropped cases 
+drop.list <- ioda.data %>%
+  dplyr::filter(drop==TRUE) %>%
+  dplyr::select(location_name, country_name, drop)
+
+drop.list <- drop.list %>% filter(!location_name=="Eastern Cape")
+
+ioda.data <- ioda.data %>%
+  dplyr::filter(drop==FALSE)
+
+###drop IODA cases where regional description is too broadly defined (e.g. northern region)
+###I do not have geo-coded data on the location of outages by CAIDA
+ioda.data <- ioda.data %>%
+  dplyr::filter(!country_name=="Malawi")
+
+###Countries experienced outages in multiple regions a) at the same time and b) at different points in time. Group IODA data by country and startday to get an overview. 
+group <- ioda.data %>%
+  dplyr::group_by(country_name, startday) %>%
+  count() %>%
+  mutate(multiple = ifelse(n>1, TRUE, FALSE))  
+
+group <- as.data.frame(group)
+group <- group %>% mutate(group_id=row_number())
+
+ioda.data <- left_join(ioda.data, group, by=c("country_name", "startday"))
+
+###drop outages which occur for a second time in the same region (otherwise I would assign individuals to the pre-treatment group which would have already experienced an outage)
+ioda.data$location_name[duplicated(ioda.data$location_name)]
+
+ioda.data <- ioda.data %>%
+  dplyr::filter(!group_id==8 & !group_id==10  & !group_id==6 & !group_id==13 & !group_id==24 & !group_id==18 & !location_name=="Kavango West")
+
+
+
+```
+
+
+Merge data: merge every outage with the sample of the respective country
+
+
+```{r}
+sample <- full_join(afro.data, ioda.data, by="country_name")
+
+###drop countries which have not experienced Internet outages
+sample <- sample %>% drop_na(datasource)
+
+```
+Individual selection for Tunisia (use geocoded data)
+
+```{r}
+tun <- read.csv("geo-code/r7-geocode/TUN_R7.Data_7Feb19_release.w.local.info.csv")
+tun <- tun %>%
+  dplyr::select(RESPNO, EA_GPS_LA, EA_GPS_LO, EA_GPS_OTHER) %>%
+  separate(EA_GPS_OTHER, c("col1", "col2"), ",")
+
+tun$EA_GPS_LA <- ifelse(is.na(tun$EA_GPS_LA), tun$col1,tun$EA_GPS_LA)
+tun$EA_GPS_LO <- ifelse(is.na(tun$EA_GPS_LO), tun$col2,tun$EA_GPS_LO)
+
+tun <- tun %>%
+  dplyr::select(-col1, -col2) %>%
+  rename(respno = RESPNO, latitude = EA_GPS_LA, longitude = EA_GPS_LO)
+
+summary(tun)
+
+
+tun <- left_join(sample, tun, by="respno")
+
+tun <- tun %>%
+  filter(country_name=="Tunisia") 
+
+tun$latitude <- as.numeric(tun$latitude)
+tun$longitude <- as.numeric(tun$longitude)
+
+
+
+tun <- tun %>%
+  drop_na(longitude, latitude)
+
+
+tun <- st_as_sf(tun, coords = c("longitude", "latitude"), crs = 4326)
+
+
+#load afriadmin data (includes polygons of regions in Tunisia)
+tunisia <- afriadmin("tunisia", level=1)
+
+joined_tun <- st_join(tun, tunisia)
+table(joined_tun$shapeName)
+
+#shapeName replaces region
+joined_tun$region_name <- joined_tun$shapeName
+joined_tun$region <- joined_tun$shapeISO
+
+joined_tun$region <- joined_tun$region %>% stringr::str_remove("TN-")
+joined_tun$region <- as.numeric(joined_tun$region)
+
+joined_tun <- st_drop_geometry(joined_tun)
+
+joined_tun <- joined_tun %>%
+  dplyr::select(-shapeName, -shapeISO, -shapeID, -shapeGroup, -shapeType)
+
+sample <- sample %>%
+  dplyr::filter(!country_code=="TN")
+
+sample <- rbind(sample, joined_tun)
+
+rm(joined_tun, tun, tunisia)
+```
+
+Assign to different groups if a) outages occur at the same time in different regions, all individuals are put into the treatment group of time frame
+```{r}
+###Drop all regions which have experienced an outage event before interviews took place
+names(drop.list)[1] <- "region_name"
+sample <- dplyr::left_join(sample, drop.list, by=c("region_name", "country_name"))
+sample <- sample %>%
+  dplyr::filter(is.na(drop.y))
+```
+
+Assign treated individuals
+```{r}
+sample$treat <- ifelse(sample$region_name==sample$location_name,1,0)
+```
+
+Assign pre- and post treatment phases (different for each individual outage)
+```{r}
+sample <- sample %>%
+  dplyr::group_by(ID) %>%
+  dplyr::mutate(post = ifelse(day>=startday,1,0))
+```
+
+Check for observations within countries (drop countries without pre-treated or post-treated observations)
+```{r}
+table(sample$country_name, sample$treat, sample$post)
+sample <- sample %>%
+  dplyr::filter(!country_name=="Sudan" & !country_name=="Tanzania" & !country_name=="Namibia")
+
+```
+
+
+Collapse those regions which experience an Internet outage around the same time (treat Internet outages in multiple regions as one when occurring at the same time)
+```{r}
+ov <- sample %>%
+  dplyr::group_by(ID) %>%
+  dplyr::summarise(startday=startday, country_name=country_name, region_name=region_name, treat=treat, multiple=multiple, region=region) %>%
+  dplyr::distinct() %>%
+  dplyr::filter(treat==1)
+
+ov <- ov %>%
+  dplyr::group_by() %>%
+  dplyr::select(-ID,-treat, -multiple, -region)
+
+colnames(ov) = c("Date", "Country", "Region")
+
+```
+
+```{r}
+sample$region <- as.numeric(sample$region)
+sample <- sample %>%
+  dplyr::filter(!ID==3 #drop region 'Central' in Ghana (outage at the same time as in Ashanti)
+         & !ID==32 #drop region 'Eastern' in Kenya (outage at the same time as in Nairobi)
+         & !ID==42 & !ID==43 #drop regions 'Atsimo Adrefana' and 'Diana' from Madagascar 
+         & (!(region==543 & ID==94)) #drop Sofala from Inhambane case (Mozambique)
+         & (!(region==544 & ID==117))#(drop Inhambane from Sofala case (Mozambique))
+        & !ID==133 #drop Grand Port in Mauritius (outage at the same time in Plaine Wilhems)
+        & !ID==501 #drop Siliana from Beja Tunisia (case from 2018-04-01)
+        & (!(region==31 & ID==495)) #drop Beja from Siliana case
+        & (!(region==21 & ID==495)) #drop Nabeul from Siliana case
+        & (!(region==71 & ID==495)) #drop Gafsa from Siliana case
+        & (!(region==61 & ID==495)) #drop Sfax from Siliana case
+        & (!(region==52 & ID==495)) #drop Monastir from Siliana case
+        & !ID==495 & !ID==498 & !ID==499 & !ID==502 #drop Gafsa, Monastir, Nabeul, Sfax from Tunisia (occurrence of outage in Beja at the same time) 
+        & (!(region==32 & ID==493)) #drop Jendouba from Beja case (case from 2018-04-17)
+        & !ID==497 #drop Tunis case (Tunisia)
+        & (!(region==705 & ID==548)) #drop Mpumalanga from North West case (South Africa)
+        & (!(region==706 & ID==558)) #drop North West from Mpumalanga case (South Africa)
+        & (!(region==700 & ID==558)) #drop Eastern Cape case from Mpumalanga case (South Africa)
+        & !ID==566) #drop Eastern Cape case (together with North West case)
+
+sample <- sample %>% 
+  dplyr::mutate(treat = replace(treat, region == 261, 1), #assign individuals from Central (Ghana)
+         treat = replace(treat, region == 302, 1), #assign individuals from Eastern (Kenya)
+         treat = replace(treat, region == 426, 1), #assign individuals from Atsimo Andrefana(Madagascar)
+         treat = replace(treat, region == 432, 1), #assign individuals from Diana (Madagascar)
+         treat = replace(treat, region == 904, 1), #assign individuals from Grand Port (Mauritius)
+         treat = replace(treat, region == 34, 1),
+         treat = replace(treat, region_name == "Siliana", 1),
+         treat = replace(treat, region_name == "Gafsa", 1),
+         treat = replace(treat, region_name == "Monastir", 1),
+         treat = replace(treat, region_name == "Nabeul", 1),
+         treat = replace(treat, region_name == "Sfax", 1),
+         treat = replace(treat, region == 700, 1)) #assign individuals from Eastern Cape (South Africa)
+
+table(sample$post, sample$treat)
+```
+
+```{r}
+#Overview by country
+table(sample$country_code)
+
+mz <- sample %>% filter(country_code=="MZ")
+table(mz$treat, mz$post, mz$region_name) #Inhambane no post-treated individuals (sole case might drop ID 117)
+
+za <- sample %>% filter(country_code=="ZA")
+table(za$treat, za$post, za$region_name) #Mpumalanga no post-treated individuals (sole case ID 558)
+
+#drop cases with no post-treated individuals
+sample <- sample %>% filter(!ID==117 & !ID==558)
+
+ov <- ov %>% filter(!Region=="Inhambane" & !Region=="Mpumalanga")
+
+stargazer(as.data.frame(ov), summary=FALSE, rownames = F, out="~/Dropbox/Apps/Overleaf/AfricaOutages/appendix-A2.tex", float = F)
+```
+
+
+
+Add population data
+```{r}
+pop <- read_excel("Data_Extract_From_Subnational_Population.xlsx")
+
+pop <- pop %>%
+  dplyr::select(`Country Name`,`2016 [YR2016]`) %>%
+  drop_na() %>%
+  separate('Country Name', paste("Country Name", 1:2, sep="_"), sep=",", extra="drop") %>%
+  rename(country_name='Country Name_1', region_name='Country Name_2', pop='2016 [YR2016]')
+
+pop$region_name <- str_replace_all(pop$region_name, " ", "")
+
+sample <- left_join(sample, pop, by = c("country_name", "region_name"))
+```
+
+Add prior outages
+```{r}
+prior <- read.csv("prior_outages/prior.csv")
+prior <- prior %>%
+  dplyr::select(-country_name)
+
+sample <- left_join(sample, prior, by="location_name")
+
+```
+
+```{r}
+###save as csv file
+write.csv(sample,"afro-sample-v2.csv", row.names = F)
+
+```
+
+Visualization Maps
+```{r}
+
+###Ghana
+gha <- afriadmin("ghana", level=1)
+gha$treat <- 0
+gha <- gha %>%
+  mutate(treat = replace(treat, shapeName=="Ashanti",1),
+         treat = replace(treat, shapeName=="Central",1),
+         treat = replace(treat, shapeName=="Greater Accra",NA))
+tm_gha <-tm_shape(gha) +
+  tm_polygons("treat", palette="Greys") +
+  tm_layout(title="Ghana", legend.show=F)
+tmap_save(tm_gha, "~/Dropbox/Apps/Overleaf/AfricaOutages/map-ghana.png", width=1920, height=1080, asp=0)
+
+
+###Kenya
+ken <- st_read(file.path("kenya_region_shapefile.shp"), crs=4326)
+table(ken$name_1)
+ken$treat <- 0
+ken <- ken %>%
+  mutate(treat = replace(treat, name_1=="Nairobi",1),
+         treat = replace(treat, name_1=="Eastern",1))
+tm_ken <-tm_shape(ken) +
+  tm_polygons("treat", palette="Greys") +
+  tm_layout(title="Kenya", legend.show=F)
+tmap_save(tm_ken, "~/Dropbox/Apps/Overleaf/AfricaOutages/map-kenya.png", width=1920, height=1080, asp=0)
+
+
+
+###Madagascar 
+mad <- afriadmin("madagascar", level=1)
+mad$treat <- 0
+table(mad$shapeName)
+mad <- mad %>%
+  mutate(treat = replace(treat, shapeName=="Analamanga",1),
+         treat = replace(treat, shapeName=="Atsimo Andrefana",1),
+         treat = replace(treat, shapeName=="Diana",1))
+tm_mad <-tm_shape(mad) +
+  tm_polygons("treat", palette="Greys") +
+  tm_layout(title="Madagascar", legend.show=F)
+tmap_save(tm_mad, "~/Dropbox/Apps/Overleaf/AfricaOutages/map-madagascar.png", width=1920, height=1080, asp=0)
+
+###Mozambique 
+moz <- afriadmin("mozambique", level=1)
+moz$treat <- 0
+table(moz$shapeName)
+moz <- moz %>%
+  mutate(treat = replace(treat, shapeName=="Sofala",1),
+         treat = replace(treat, shapeName=="Inhambane",NA))
+tm_moz <-tm_shape(moz) +
+  tm_polygons("treat", palette="Greys") +
+  tm_layout(title="Mozambique", legend.show=F)
+tmap_save(tm_moz, "~/Dropbox/Apps/Overleaf/AfricaOutages/map-mozambique.png", width=1920, height=1080, asp=0)
+
+###Mauritius 
+mau <- afriadmin("mauritius", level=1)
+table(mau$shapeName)
+mau$treat <- 0
+mau <- mau %>%
+  mutate(treat = replace(treat, shapeName=="Grand Port",1),
+         treat = replace(treat, shapeName=="Plaines Wilhems",1),
+         treat = replace(treat, shapeName=="Black River",NA))
+tm_mau <-tm_shape(mau) +
+  tm_polygons("treat", palette="Greys") +
+  tm_layout(title="Mauritius", legend.show=F)
+tmap_save(tm_mau, "~/Dropbox/Apps/Overleaf/AfricaOutages/map-mauritius.png", width=1920, height=1080, asp=0)
+
+###Senegal 
+sen <- afriadmin("senegal", level=1)
+table(sen$shapeName)
+sen$treat <- 0
+sen <- sen %>%
+  mutate(treat = replace(treat, shapeName=="Thies",1),
+         treat = replace(treat, shapeName=="Kedougou",NA),
+         treat = replace(treat, shapeName=="Ziguinchor",NA))
+tm_sen <-tm_shape(sen) +
+  tm_polygons("treat", palette="Greys") +
+  tm_layout(title="Senegal", legend.show=F)
+tmap_save(tm_sen, "~/Dropbox/Apps/Overleaf/AfricaOutages/map-senegal.png", width=1920, height=1080, asp=0)
+
+###Tunisia 
+tun <- afriadmin("tunisia", level=1)
+table(tun$shapeName)
+tun$treat <- 0
+tun1 <- tun %>%
+  mutate(treat = replace(treat, shapeName=="Jendouba",1),
+         treat = replace(treat, shapeName=="Siliana",1),
+         treat = replace(treat, shapeName=="Tunis",NA),
+         treat = replace(treat, shapeName=="Béja",NA),
+         treat = replace(treat, shapeName=="Gafsa",NA),
+         treat = replace(treat, shapeName=="Monastir",NA),
+         treat = replace(treat, shapeName=="Nabeul",NA),
+         treat = replace(treat, shapeName=="Sfax",NA))
+tm_tun1 <-tm_shape(tun1) +
+  tm_polygons("treat", palette="Greys") +
+  tm_layout(title="Tunisia", legend.show=F)
+tmap_save(tm_tun1, "~/Dropbox/Apps/Overleaf/AfricaOutages/map-tunisia1.png", width=1920, height=1080, asp=0)
+
+tun2 <- tun %>%
+  mutate(treat = replace(treat, shapeName=="Jendouba",NA),
+         treat = replace(treat, shapeName=="Siliana",NA),
+         treat = replace(treat, shapeName=="Tunis",NA),
+         treat = replace(treat, shapeName=="Béja",1),
+         treat = replace(treat, shapeName=="Gafsa",1),
+         treat = replace(treat, shapeName=="Monastir",1),
+         treat = replace(treat, shapeName=="Nabeul",1),
+         treat = replace(treat, shapeName=="Sfax",1))
+tm_tun2 <-tm_shape(tun2) +
+  tm_polygons("treat", palette="Greys") +
+  tm_layout(title="Tunisia", legend.show=F)
+tmap_save(tm_tun2, "~/Dropbox/Apps/Overleaf/AfricaOutages/map-tunisia2.png", width=1920, height=1080, asp=0)
+
+###South Africa  
+sa <- afriadmin("south africa", level=1)
+table(sa$shapeName)
+sa$treat <- 0
+sa <- sa %>%
+  mutate(treat = replace(treat, shapeName=="North West",1),
+         treat = replace(treat, shapeName=="Eastern Cape",1),
+         treat = replace(treat, shapeName=="Mpumalanga", NA))
+         
+tm_sa <-tm_shape(sa) +
+  tm_polygons("treat", palette="Greys") +
+  tm_layout(title="South Africa", legend.show=F)
+tmap_save(tm_sa, "~/Dropbox/Apps/Overleaf/AfricaOutages/map-southafrica.png", width=1920, height=1080, asp=0)
+
+
+
+
+```
